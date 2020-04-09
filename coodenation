@@ -1,0 +1,140 @@
+library(dplyr)  ### data cleaning
+library(readr) ### reading data 
+library(readxl)
+library(magrittr) ## pipe
+library(glmnet) ## lasso and so on
+library(randomForest)
+library(xgboost)
+library(fnn) ## knn
+library(SuperLearner) ##let's see 
+library(rpart)
+library(tidyr)
+library(ggplot2)
+
+set.seed(1234)
+### criteria
+mse<- function(a,b){
+  c=(a-b)^2
+  return(mean(c)) }
+
+mae<- function(a,b){
+  c=abs(a-b)
+  return(mean(c)) }
+
+
+
+### DATASET
+
+data <- read.csv("~/Desktop/codenation/testfiles/train.csv",
+                 stringsAsFactors = T)
+data = data%>% filter(TP_PRESENCA_MT==1) ## somente quem participou
+### test
+
+test <- read.csv("~/Desktop/codenation/testfiles/test.csv",stringsAsFactors = T)
+
+
+test %>% filter(TP_PRESENCA_CN %in% c(0,2) | TP_PRESENCA_CH %in% c(0,2) |TP_PRESENCA_LC %in% c(0,2)) %>%
+  select(TP_PRESENCA_CN,TP_PRESENCA_CH,TP_PRESENCA_LC)
+
+test_mt0 = test %>% filter(TP_PRESENCA_CN %in% c(0,2) | TP_PRESENCA_CH %in% c(0,2) |TP_PRESENCA_LC %in% c(0,2))
+NU_NOTA_MT=rep(0,nrow(test_mt0))
+test_mt0 <- cbind(test_mt0,NU_NOTA_MT)
+
+test_mt1<- test %>%anti_join(test_mt0,by='NU_INSCRICAO')
+
+nome <- setdiff(names(test),c("NU_INSCRICAO", "CO_UF_REISDENCIA", "CO_PROVA_CN" , "CO_PROVA_CH" ,"CO_PROVA_LC" ,
+                              "CO_PROVA_MT","TP_PRESENCA_CN","TP_PRESENCA_CH","TP_PRESENCA_LC",
+                              "Q026","Q027","TP_ENSINO","TP_DEPENDENCIA_ADM_ESC")) ##removing work infos but i shouldnt
+
+test_mt1 <- test_mt1 %>% select(nome)
+
+
+
+
+## 1st model drop the NA, Drop zero and check 
+
+data <- data %>% filter(NU_NOTA_MT !=0) %>% select(nome,NU_NOTA_MT)
+
+## count na 
+na<-function(x){ d= sum(ifelse(is.na(x),1,0))
+                        return(d)
+}
+apply(data,2,na)  ## i'll take 1000 rows to impute those values( this induces some bias but lets do it)
+
+
+rempl<-function(x){
+  y= x%>% as.data.frame() %>% drop_na() %>% unlist() %>% as.numeric() %>% mean()
+  x=replace_na(x,y)
+  return(x)
+  
+}
+
+val_moyen=apply(data[,c("NU_NOTA_CN","NU_NOTA_CH")],2,mean) %>% as.numeric()
+
+data[,c("NU_NOTA_CN","NU_NOTA_CH")] <-   
+  data[,c("NU_NOTA_CN","NU_NOTA_CH")]  %>% apply(2,rempl)
+
+which(apply(data,2,na)>0) %>% names()
+
+
+
+
+### lets split
+set.seed(1234)
+id= sample(1:nrow(data),0.75*nrow(data),replace = F)
+train_1= data[id,]
+test_1 = data[-id,-ncol(data)]; ytest1=data[-id,ncol(data)]
+
+##lm 
+model1= lm(NU_NOTA_MT~. , data = train_1)
+summary(model1)  
+ymod1=predict.lm(model1,test_1)
+ymod1
+mse_lm=mse(ytest1,ymod1)
+mse_lm
+y1=predict.lm(model1,test_mt1)
+
+## glm
+model2= glm(NU_NOTA_MT~. , family=Gamma,data = train_1)
+summary(model2)  
+ymod2=predict.glm(model2,test_1,type = "response")
+ymod2
+mse_glm=mse(ytest1,ymod2)
+mse_glm
+y2=predict.glm(model2,test_mt1,type = "response")
+
+##rf
+model3= randomForest(NU_NOTA_MT~.,data=train_1,ntree=600)
+ymod3=predict(model3,test_1)
+ymod3
+mse_rf=mse(ytest1,ymod3)
+mse_rf
+y3=predict(model3,test_mt1)
+
+## sl
+sl = SuperLearner(Y = train_1$NU_NOTA_MT, X = train_1[,-36], family = gaussian(),
+                  SL.library = c( "SL.glmnet","SL.xgboost"))
+ysl = predict(sl, test_1, onlySL = TRUE)
+mse_sl=mse(ysl$pred,ytest1)
+mse_sl
+y4 = predict(sl, test_mt1, onlySL = TRUE)
+
+### med 
+out=cbind(ymod2,ymod3,ysl$pred)
+ymed= apply(out,1,mean)
+mse_med=mse(ymed,ytest1)
+mse_med
+
+outfinal= cbind(y2,y3,y4$pred)
+yfinal=apply(outfinal,1,mean) %>% unname() %>% as.numeric()
+yfinal
+
+test_mt1 = cbind(test_mt1, NU_NOTA_MT=yfinal)
+ 
+NU_INSCR_0= test %>% filter(TP_PRESENCA_CN %in% c(0,2) | TP_PRESENCA_CH %in% c(0,2) |TP_PRESENCA_LC %in% c(0,2))%>% 
+select(NU_INSCRICAO) %>% cBind(NU_NOTA_MT=rep(0,nrow(test_mt0)))
+NU_INSCR_1=  test %>%anti_join(test_mt0,by='NU_INSCRICAO') %>% select(NU_INSCRICAO) %>% cbind(NU_NOTA_MT=yfinal)
+
+resposta= test %>% left_join(rbind(NU_INSCR_0,NU_INSCR_1, by='NU_INSCRICAO') ) %>% select(NU_INSCRICAO,NU_NOTA_MT)
+write_csv(resposta,"answer.csv")
+
